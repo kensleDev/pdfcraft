@@ -54,6 +54,9 @@ fn main() {
                     // eframe never raises a close request on a browser reload or tab close, so `guard_quit` never
                     // prompts; ask the browser to confirm instead while a document has unsaved work (#812).
                     warn_before_unload(app.unsaved_flag.clone());
+                    // The theme bridge is independent of the file bridge and works for any
+                    // same-origin parent. Register before announcing readiness.
+                    theme_host::listen(cc.egui_ctx.clone());
                     // `?host=parent`: a same-origin page embedding PdfCraft in an iframe (such
                     // as the Nextcloud app) passes files in and takes saves back (`host` below).
                     if query_param("host").as_deref() == Some("parent")
@@ -136,6 +139,46 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 ///
 /// Only the parent window on the app's own origin is heard or answered. With a parent on
 /// another origin there is no bridge: the app runs as if unframed and saves download.
+#[cfg(target_arch = "wasm32")]
+mod theme_host {
+    use eframe::wasm_bindgen::{JsCast, closure::Closure};
+
+    pub fn listen(ctx: egui::Context) {
+        let Some(window) = web_sys::window() else { return };
+        let Ok(origin) = window.location().origin() else { return };
+        let Ok(parent) = window.parent() else { return };
+        let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+            if event.origin() != origin || !event.source().is_some_and(|source| js_sys::Object::is(&source, &parent)) {
+                return;
+            }
+            let data = event.data();
+            if string(&data, "type").as_deref() != Some("inbound:theme:set")
+                || js_sys::Reflect::get(&data, &"version".into()).ok().and_then(|v| v.as_f64()) != Some(1.0)
+            {
+                return;
+            }
+            match string(&data, "mode").as_deref() {
+                Some("light") => ctx.set_visuals(egui::Visuals::light()),
+                Some("dark") => ctx.set_visuals(egui::Visuals::dark()),
+                _ => return,
+            }
+            ctx.request_repaint();
+        });
+        if window.add_event_listener_with_callback("message", on_message.as_ref().unchecked_ref()).is_err() {
+            return;
+        }
+        on_message.forget();
+        let ready = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&ready, &"type".into(), &"inbound:theme:ready".into());
+        let _ = js_sys::Reflect::set(&ready, &"version".into(), &1.into());
+        let _ = parent.post_message(&ready, &origin);
+    }
+
+    fn string(data: &eframe::wasm_bindgen::JsValue, key: &str) -> Option<String> {
+        js_sys::Reflect::get(data, &key.into()).ok()?.as_string()
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod host {
     use eframe::wasm_bindgen::{JsCast, JsValue, closure::Closure};

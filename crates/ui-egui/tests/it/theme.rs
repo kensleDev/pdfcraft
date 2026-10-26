@@ -158,6 +158,25 @@ fn restored_system_tracks_native_input_without_rewriting_saved_preference() {
 }
 
 #[test]
+fn host_theme_override_is_transient_and_saved_preference_remains_authoritative_after_clear() {
+    let mut h = harness();
+    h.state_mut().set_theme_preference(ThemePreference::Dark);
+    h.state_mut().set_theme_override(Some(ThemeKind::Light));
+    h.run_steps(2);
+    assert_eq!(h.state().theme, ThemeKind::Light);
+    assert_eq!(h.state().theme_preference, ThemePreference::Dark);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&h.state().persist()).unwrap()["theme"], "Dark");
+
+    h.state_mut().set_theme_override(Some(ThemeKind::Dark));
+    h.run_steps(2);
+    assert_eq!(h.state().theme, ThemeKind::Dark);
+    h.state_mut().set_theme_override(None);
+    h.run_steps(2);
+    assert_eq!(h.state().theme, ThemeKind::Dark);
+    assert_eq!(h.state().theme_preference, ThemePreference::Dark);
+}
+
+#[test]
 fn unknown_system_uses_light_after_a_manual_dark_choice() {
     let mut app = PdfCraftApp::new();
     app.set_theme_preference(ThemePreference::Dark);

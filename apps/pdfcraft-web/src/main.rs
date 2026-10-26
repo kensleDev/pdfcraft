@@ -8,6 +8,7 @@ fn main() {
     use eframe::wasm_bindgen::JsCast;
     use pdfcraft_ui_egui::PdfCraftApp;
 
+    let host_theme = std::rc::Rc::new(std::cell::Cell::new(None));
     let options = eframe::WebOptions { renderer: eframe::Renderer::Glow, ..Default::default() };
     wasm_bindgen_futures::spawn_local(async move {
         let Some(canvas) = web_sys::window()
@@ -21,7 +22,7 @@ fn main() {
             .start(
                 canvas,
                 options,
-                Box::new(|cc| {
+                Box::new(move |cc| {
                     let mut app = PdfCraftApp::new();
                     // "printcraft": settings saved under the app's former name, PrintCraft.
                     if let Some(json) = cc.storage.and_then(|s| s.get_string("pdfcraft").or_else(|| s.get_string("printcraft"))) {
@@ -54,9 +55,9 @@ fn main() {
                     // eframe never raises a close request on a browser reload or tab close, so `guard_quit` never
                     // prompts; ask the browser to confirm instead while a document has unsaved work (#812).
                     warn_before_unload(app.unsaved_flag.clone());
+                    theme_host::listen(host_theme.clone(), cc.egui_ctx.clone());
                     // The theme bridge is independent of the file bridge and works for any
                     // same-origin parent. Register before announcing readiness.
-                    theme_host::listen(cc.egui_ctx.clone());
                     // `?host=parent`: a same-origin page embedding PdfCraft in an iframe (such
                     // as the Nextcloud app) passes files in and takes saves back (`host` below).
                     if query_param("host").as_deref() == Some("parent")
@@ -78,7 +79,7 @@ fn main() {
                             &"PdfCraft: ?host=parent needs a framing page on the same origin; saves download instead".into(),
                         );
                     }
-                    Ok(Box::new(app))
+                    Ok(Box::new(ThemeHostApp { app, theme: host_theme.clone() }))
                 }),
             )
             .await;
@@ -140,28 +141,76 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// Only the parent window on the app's own origin is heard or answered. With a parent on
 /// another origin there is no bridge: the app runs as if unframed and saves download.
 #[cfg(target_arch = "wasm32")]
+struct ThemeHostApp {
+    app: pdfcraft_ui_egui::PdfCraftApp,
+    theme: std::rc::Rc<std::cell::Cell<Option<pdfcraft_ui_egui::theme::ThemeKind>>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl eframe::App for ThemeHostApp {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(theme) = self.theme.get() {
+            self.app.set_theme_override(Some(theme));
+        }
+        self.app.logic(ctx, frame);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.app.ui(ui, frame);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.app.save(storage);
+    }
+
+    fn auto_save_interval(&self) -> std::time::Duration {
+        self.app.auto_save_interval()
+    }
+
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        self.app.clear_color(visuals)
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        self.app.persist_egui_memory()
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        self.app.raw_input_hook(ctx, input);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 mod theme_host {
     use eframe::wasm_bindgen::{JsCast, closure::Closure};
+    use pdfcraft_ui_egui::theme::ThemeKind;
+    use std::{cell::Cell, rc::Rc};
 
-    pub fn listen(ctx: egui::Context) {
+    pub fn listen(theme: Rc<Cell<Option<ThemeKind>>>, ctx: egui::Context) {
         let Some(window) = web_sys::window() else { return };
         let Ok(origin) = window.location().origin() else { return };
-        let Ok(parent) = window.parent() else { return };
+        let Ok(Some(parent)) = window.parent() else { return };
+        let listener_origin = origin.clone();
+        let listener_parent = parent.clone();
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-            if event.origin() != origin || !event.source().is_some_and(|source| js_sys::Object::is(&source, &parent)) {
+            if event.origin() != listener_origin || !event.source().is_some_and(|source| js_sys::Object::is(&source, listener_parent.as_ref())) {
                 return;
             }
             let data = event.data();
-            if string(&data, "type").as_deref() != Some("inbound:theme:set")
+            let Some(object) = data.dyn_ref::<js_sys::Object>() else { return };
+            if data.is_null()
+                || js_sys::Object::keys(object).length() != 3
+                || string(&data, "type").as_deref() != Some("inbound:theme:set")
                 || js_sys::Reflect::get(&data, &"version".into()).ok().and_then(|v| v.as_f64()) != Some(1.0)
             {
                 return;
             }
-            match string(&data, "mode").as_deref() {
-                Some("light") => ctx.set_visuals(egui::Visuals::light()),
-                Some("dark") => ctx.set_visuals(egui::Visuals::dark()),
+            let kind = match string(&data, "mode").as_deref() {
+                Some("light") => ThemeKind::Light,
+                Some("dark") => ThemeKind::Dark,
                 _ => return,
-            }
+            };
+            theme.set(Some(kind));
             ctx.request_repaint();
         });
         if window.add_event_listener_with_callback("message", on_message.as_ref().unchecked_ref()).is_err() {

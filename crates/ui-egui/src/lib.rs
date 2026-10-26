@@ -537,6 +537,7 @@ pub struct PdfCraftApp {
     /// Resolved colours, including the current OS theme when following the system.
     pub theme: ThemeKind,
     pub theme_preference: ThemePreference,
+    host_theme_override: Option<ThemeKind>,
     /// The reading-colours preference (Preferences ▸ Reading colours): applied to every open
     /// document, and documents open with it (Acrobat's Replace Document Colors).
     pub reading_colors: pdfcraft_render::ReadingColors,
@@ -958,6 +959,7 @@ impl PdfCraftApp {
             comment_prefs: Default::default(),
             theme: ThemeKind::Light,
             theme_preference: ThemePreference::Light,
+            host_theme_override: None,
             reading_colors: Default::default(),
             #[cfg(target_os = "linux")]
             desktop_theme: None,
@@ -2120,6 +2122,19 @@ impl PdfCraftApp {
         self.notify(i18n::fmt(tl!(template), args));
     }
 
+    /// Apply a transient host theme without changing the saved user preference.
+    pub fn set_theme_override(&mut self, theme: Option<ThemeKind>) {
+        if self.host_theme_override == theme {
+            return;
+        }
+        self.host_theme_override = theme;
+        if let Some(ctx) = self.ctx.clone() {
+            self.sync_theme(&ctx);
+            theme::apply(&ctx, self.theme);
+            ctx.request_repaint();
+        }
+    }
+
     pub fn set_theme_preference(&mut self, preference: ThemePreference) {
         self.theme_preference = preference;
         if let Some(ctx) = self.ctx.clone() {
@@ -2174,7 +2189,7 @@ impl PdfCraftApp {
                 system = desktop.get().map(|appearance| appearance == pdfcraft_platform::desktop_theme::DesktopAppearance::Dark);
             }
         }
-        let kind = self.theme_preference.resolve(system, ThemeKind::Light);
+        let kind = self.host_theme_override.unwrap_or_else(|| self.theme_preference.resolve(system, ThemeKind::Light));
         if kind != self.theme {
             self.theme = kind;
             theme::apply(ctx, kind);
